@@ -20,6 +20,7 @@ import * as constants from 'src/constants';
 import { TerminalUI } from 'src/services/terminal-ui';
 import { browserLogin } from 'src/effects/browser-login';
 import { setupCacheDir } from 'src/effects/setup-cache-dir';
+import { atomicWritePrivateFileString } from 'src/utils/atomic-write';
 import { CLIENT_API_ERROR_TAGS } from 'src/services/composio-errors';
 import { commandInputError } from 'src/commands/errors';
 import { reportFailure } from 'src/effects/report-failure';
@@ -116,6 +117,37 @@ const upsertEnvVar = (content: string, key: string, value: string): string => {
   return content.trim().length ? `${content.trimEnd()}\n${line}\n` : `${line}\n`;
 };
 
+// The project API key and test-user id come from the backend response. A
+// newline or control character in either would inject extra dotenv lines (e.g.
+// COMPOSIO_BASE_URL=https://attacker) that the user's app/CLI then sources,
+// redirecting credentials. Fail closed rather than write an attacker-controlled
+// line into .env.local.
+const assertNoEnvInjection = (key: string, value: string) =>
+  /[\r\n\u0000]/.test(value)
+    ? Effect.fail(
+        commandInputError('dev init')(
+          `The server returned a ${key} value containing a newline or control character; refusing to write it to .env.local.`
+        )
+      )
+    : Effect.void;
+
+// Best-effort: keep the project API key out of git by ignoring .env.local.
+const ensureGitignored = (cwd: string, entry: string) =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const gitignorePath = path.join(cwd, '.gitignore');
+    const existing = Option.getOrElse(
+      yield* fs.readFileString(gitignorePath, 'utf8').pipe(Effect.option),
+      () => ''
+    );
+    if (existing.split('\n').some(line => line.trim() === entry)) {
+      return;
+    }
+    const next = existing.trim().length ? `${existing.trimEnd()}\n${entry}\n` : `${entry}\n`;
+    yield* fs.writeFileString(gitignorePath, next);
+  }).pipe(Effect.ignore);
+
 const ensureProjectApiKeyInEnv = (params: { cwd: string; selected: ProjectKeys }) =>
   Effect.gen(function* () {
     const { cwd, selected } = params;
@@ -124,6 +156,17 @@ const ensureProjectApiKeyInEnv = (params: { cwd: string; selected: ProjectKeys }
     const path = yield* Path.Path;
 
     const envPath = path.join(cwd, '.env.local');
+    // Refuse to write through a symlink (a malicious repo could ship
+    // .env.local -> ~/.zshrc so our write lands on an unrelated file).
+    const envIsSymlink = yield* fs.readLink(envPath).pipe(
+      Effect.as(true),
+      Effect.catch(() => Effect.succeed(false))
+    );
+    if (envIsSymlink) {
+      return yield* commandInputError('dev init')(
+        `.env.local is a symlink; refusing to write credentials through it. Remove ${envPath} and re-run.`
+      );
+    }
     const envExists = yield* fs.exists(envPath);
     const existingEnvContent = envExists ? yield* fs.readFileString(envPath, 'utf8') : '';
     const hasProjectApiKey = /^COMPOSIO_API_KEY=.*/m.test(existingEnvContent);
@@ -159,14 +202,17 @@ const ensureProjectApiKeyInEnv = (params: { cwd: string; selected: ProjectKeys }
 
     let nextEnvContent = existingEnvContent;
     if (!hasProjectApiKey && projectApiKey) {
+      yield* assertNoEnvInjection('COMPOSIO_API_KEY', projectApiKey);
       nextEnvContent = upsertEnvVar(nextEnvContent, 'COMPOSIO_API_KEY', projectApiKey);
     }
     if (!hasTestUserId) {
+      yield* assertNoEnvInjection('COMPOSIO_TEST_USER_ID', composioTestUserId);
       nextEnvContent = upsertEnvVar(nextEnvContent, 'COMPOSIO_TEST_USER_ID', composioTestUserId);
     }
 
     if (nextEnvContent !== existingEnvContent) {
-      yield* fs.writeFileString(envPath, nextEnvContent);
+      yield* atomicWritePrivateFileString({ fs, target: envPath, contents: nextEnvContent });
+      yield* ensureGitignored(cwd, '.env.local');
     }
     yield* writeProjectConfig(composioDir, {
       ...selected,
@@ -370,6 +416,14 @@ const initInteractiveFlow = (params: { composioDir: string; noBrowser: boolean; 
         Effect.gen(function* () {
           yield* Effect.logDebug('Failed to resolve project API key from session/info:', e);
           yield* logEnvCreationHttpError(ui)(e);
+        })
+      ),
+      // A refused write (symlinked .env.local, or an injected value from the
+      // server) should show its own reason, not the generic decode warning.
+      Effect.catchTag('commands/CommandInputError', e =>
+        Effect.gen(function* () {
+          yield* Effect.logDebug('Refused to write .env.local:', e);
+          yield* ui.log.warn(e.message);
         })
       ),
       // The project is already written; a key the CLI could not resolve is a

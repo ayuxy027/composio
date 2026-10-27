@@ -32,6 +32,12 @@
   the single matching upload field in an existing array item; ambiguous targets
   require explicit JSON. This fixes Word and PowerPoint image editing through the CLI.
 
+- `composio init` now hardens the `.env.local` it writes: it rejects a project
+  API key or test-user id returned by the server that contains a newline or
+  control character (which could inject extra dotenv lines such as
+  `COMPOSIO_BASE_URL`), writes the file with `0600` permissions, refuses to
+  write through a symlink, and adds `.env.local` to `.gitignore`.
+
 - `composio upgrade` no longer starts with a stale "Update available" line.
   The line came from the cached daily update check, so right after a release
   it could name an older version than the one `composio upgrade` then
