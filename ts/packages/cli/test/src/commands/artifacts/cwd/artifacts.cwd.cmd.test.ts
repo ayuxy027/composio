@@ -24,14 +24,14 @@ describe('CLI: composio artifacts cwd', () => {
   });
 
   layer(TestLive())('[Given] no CLI session and no configured root', it => {
-    it.effect('[Then] prints `composio` under the temporary directory', () =>
+    it.effect('[Then] prints the artifacts dir under the user home', () =>
       Effect.gen(function* () {
         const path = yield* Path.Path;
         const os = yield* NodeOs;
         yield* cli(['artifacts', 'cwd']);
 
         expect(yield* MockConsole.getLines({ stream: 'stdout' })).toEqual([
-          path.join(os.tmpdir, 'composio'),
+          path.join(os.homedir, '.composio', 'artifacts'),
         ]);
       })
     );

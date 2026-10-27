@@ -17,11 +17,28 @@ export const resolveArtifactsRoot = Effect.gen(function* () {
     sessionDirectory ||
     cacheDirectory ||
     cliUserConfig.data.artifactDirectory?.trim() ||
-    path.join(os.tmpdir, 'composio')
+    path.join(os.homedir, '.composio', 'artifacts')
   );
 });
 
 const SESSION_HISTORY_FILE = 'session-history.jsonl';
+
+// Session artifacts hold raw tool arguments, outputs and trigger payloads, so
+// they are created private to the current user: 0700 directories and 0600
+// files. Combined with the user-owned ~/.composio default root (above), this
+// keeps them unreadable by other local users and removes the shared-/tmp
+// symlink pre-creation vector.
+const ARTIFACT_DIR_MODE = 0o700;
+const ARTIFACT_FILE_MODE = 0o600;
+
+const makePrivateDirectory = (dir: string) =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    yield* fs.makeDirectory(dir, { recursive: true });
+    // chmod is defense-in-depth over the private root; a filesystem that cannot
+    // honor it (e.g. a non-POSIX mount) still gets the private location.
+    yield* fs.chmod(dir, ARTIFACT_DIR_MODE).pipe(Effect.ignore);
+  });
 
 export type CliSessionArtifacts = {
   readonly sessionId: string;
@@ -39,7 +56,6 @@ export const resolveCliSessionArtifacts = (params?: {
   readonly consumerUserId?: string;
 }) =>
   Effect.gen(function* () {
-    const fs = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
     const sessionIdOption = yield* getOrCreateProbablyMyCliSessionIdForCurrentCwd(params).pipe(
       Effect.option,
@@ -50,9 +66,10 @@ export const resolveCliSessionArtifacts = (params?: {
     }
 
     const directoryPath = path.join(yield* resolveArtifactsRoot, sessionIdOption.value);
-    const directoryCreated = yield* fs
-      .makeDirectory(directoryPath, { recursive: true })
-      .pipe(Effect.option, Effect.map(Option.isSome));
+    const directoryCreated = yield* makePrivateDirectory(directoryPath).pipe(
+      Effect.option,
+      Effect.map(Option.isSome)
+    );
     if (!directoryCreated) {
       return Option.none<CliSessionArtifacts>();
     }
@@ -85,7 +102,10 @@ export const appendCliSessionHistory = (params: {
       ...params.entry,
     });
     yield* fs
-      .writeFileString(artifactsOption.value.historyFilePath, `${line}\n`, { flag: 'a' })
+      .writeFileString(artifactsOption.value.historyFilePath, `${line}\n`, {
+        flag: 'a',
+        mode: ARTIFACT_FILE_MODE,
+      })
       .pipe(Effect.ignore);
   });
 
@@ -117,13 +137,13 @@ export const storeCliSessionArtifact = (params: {
     });
 
     return yield* Effect.gen(function* () {
-      yield* fs.makeDirectory(directoryPath, { recursive: true });
+      yield* makePrivateDirectory(directoryPath);
       const extension = (params.extension ?? 'json').replace(/^\.+/, '') || 'json';
       const filePath = path.join(
         directoryPath,
         `${sanitizeArtifactName(params.name)}_${randomToken()}.${extension}`
       );
-      yield* fs.writeFileString(filePath, params.contents);
+      yield* fs.writeFileString(filePath, params.contents, { mode: ARTIFACT_FILE_MODE });
       return filePath;
     }).pipe(Effect.option, Effect.map(Option.getOrUndefined));
   });

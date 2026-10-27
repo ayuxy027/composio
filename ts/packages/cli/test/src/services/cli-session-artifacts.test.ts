@@ -41,11 +41,9 @@ describe('CLI session artifacts', () => {
         const cacheRoot = tempy.temporaryDirectory();
         const configuredRoot = tempy.temporaryDirectory();
         const temporaryRoot = tempy.temporaryDirectory();
+        const homeRoot = tempy.temporaryDirectory();
         const root = resolveArtifactsRoot.pipe(
-          Effect.provideService(
-            NodeOs,
-            defaultNodeOs({ homedir: tempy.temporaryDirectory(), tmpdir: temporaryRoot })
-          )
+          Effect.provideService(NodeOs, defaultNodeOs({ homedir: homeRoot, tmpdir: temporaryRoot }))
         );
 
         yield* config.update({ artifactDirectory: Option.some(configuredRoot) });
@@ -60,7 +58,7 @@ describe('CLI session artifacts', () => {
         expect(yield* root).toBe(configuredRoot);
 
         yield* config.update({ artifactDirectory: Option.none() });
-        expect(yield* root).toBe(path.join(temporaryRoot, 'composio'));
+        expect(yield* root).toBe(path.join(homeRoot, '.composio', 'artifacts'));
       })
     );
 
@@ -80,6 +78,26 @@ describe('CLI session artifacts', () => {
         expect(path.dirname(filePath)).toBe(directoryPath);
         expect(path.basename(filePath)).toMatch(/^github_issue_output_[a-f0-9]{8}\.json$/i);
         expect(yield* fs.readFileString(filePath)).toBe('{"ok":true}');
+      })
+    );
+
+    it.effect('creates artifact directories 0700 and files 0600 (private to the user)', () =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        // A session directory the service must create itself (not pre-made 0700).
+        const directoryPath = path.join(tempy.temporaryDirectory(), 'session-dir');
+
+        const filePath = yield* storeCliSessionArtifact({
+          contents: '{"secret":"value"}',
+          name: 'tool output',
+          directoryPath,
+        }).pipe(Effect.flatMap(Effect.fromNullishOr));
+
+        const dirInfo = yield* fs.stat(directoryPath);
+        const fileInfo = yield* fs.stat(filePath);
+        expect(Number(dirInfo.mode) & 0o777).toBe(0o700);
+        expect(Number(fileInfo.mode) & 0o777).toBe(0o600);
       })
     );
 

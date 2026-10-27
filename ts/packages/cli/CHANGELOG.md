@@ -32,6 +32,15 @@
   the single matching upload field in an existing array item; ambiguous targets
   require explicit JSON. This fixes Word and PowerPoint image editing through the CLI.
 
+- Session artifacts (tool-execution history and stored tool outputs) are now
+  written under `~/.composio/artifacts` instead of a world-writable
+  `/tmp/composio`, with private permissions (`0700` directories, `0600`
+  files). This stops tool arguments, outputs, and trigger payloads from being
+  readable by other local users and removes a predictable-path symlink
+  pre-creation vector. A configured `COMPOSIO_SESSION_DIR`, `COMPOSIO_CACHE_DIR`
+  or `artifactDirectory` still takes precedence, and now also gets the private
+  permissions.
+
 - `composio upgrade` no longer starts with a stale "Update available" line.
   The line came from the cached daily update check, so right after a release
   it could name an older version than the one `composio upgrade` then

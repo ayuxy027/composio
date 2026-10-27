@@ -127,7 +127,7 @@ describe('CLI: composio', () => {
         yield* cli(['artifacts', 'cwd']);
         const output = (yield* MockConsole.getLines()).join('\n').trim();
 
-        expect(output).toContain(path.join(os.tmpdir(), 'composio'));
+        expect(output).toContain(path.join('.composio', 'artifacts'));
       })
     );
   });
