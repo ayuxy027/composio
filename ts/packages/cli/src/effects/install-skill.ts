@@ -11,6 +11,7 @@ import {
   type GitHubRelease,
 } from 'src/effects/resolve-cli-release';
 import { extractZipSafely } from 'src/utils/extract-zip-safely';
+import { parseChecksumsText, sha256Hex } from 'src/utils/checksums';
 
 const SKILL_NAME = 'composio-cli';
 const SKILL_ASSET_NAME = 'composio-skill.zip';
@@ -35,7 +36,7 @@ const SKILL_TARGET_DIRECTORIES: Record<SkillInstallTarget, ReadonlyArray<string>
 export class SkillInstallError extends Data.TaggedError('effects/SkillInstallError')<{
   readonly cause?: unknown;
   readonly message: string;
-  readonly phase: 'release' | 'download' | 'extract';
+  readonly phase: 'release' | 'download' | 'verify' | 'extract';
   readonly status?: number;
 }> {}
 
@@ -202,6 +203,45 @@ export const installSkill = (options?: {
           })
       )
     );
+
+    // Verify integrity before trusting the archive. A skill is agent-executable
+    // instruction content, so fail closed: refuse any archive we cannot verify
+    // against a published checksum rather than extracting it.
+    const checksumsAsset = release.assets.find(a => a.name === 'checksums.txt');
+    const expectedHash = checksumsAsset
+      ? yield* httpClient.get(checksumsAsset.browser_download_url).pipe(
+          Effect.flatMap(response =>
+            response.status >= 200 && response.status < 300 ? response.text : Effect.succeed('')
+          ),
+          Effect.map(text => parseChecksumsText(text).get(SKILL_ASSET_NAME)),
+          Effect.catch(() => Effect.succeed(undefined))
+        )
+      : undefined;
+    if (!expectedHash) {
+      return yield* Effect.fail(
+        new SkillInstallError({
+          message: `Cannot verify ${SKILL_ASSET_NAME}: no published checksum for release ${tag}. Refusing to install an unverified skill.`,
+          phase: 'verify',
+        })
+      );
+    }
+    const actualHash = yield* Effect.tryPromise({
+      try: () => sha256Hex(new Uint8Array(zipData)),
+      catch: cause =>
+        new SkillInstallError({
+          cause,
+          message: `Failed to compute the checksum of ${SKILL_ASSET_NAME}`,
+          phase: 'verify',
+        }),
+    });
+    if (actualHash !== expectedHash) {
+      return yield* Effect.fail(
+        new SkillInstallError({
+          message: `Checksum mismatch for ${SKILL_ASSET_NAME}: expected ${expectedHash}, got ${actualHash}. Refusing to install a tampered skill.`,
+          phase: 'verify',
+        })
+      );
+    }
 
     // Extract to a temp dir, then move into place
     const tmpDir = path.join(os.homedir, '.agents', '.tmp-skill-install');

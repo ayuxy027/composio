@@ -53,23 +53,47 @@ const writeLegacyPlaceholders = (installDirectory: string) => {
   });
 };
 
-const stubRepairFetch = () => {
-  const fetchMock = vi.fn((url: string) =>
-    Promise.resolve(
-      url.includes('/releases/tags/')
-        ? new Response(
-            JSON.stringify({
-              tag_name: TEST_RELEASE_TAG,
-              assets: TEST_BINARY_ASSET_NAMES.map(name => ({
+// sha256 of the stubbed archive body (new Uint8Array([1])), so the published
+// checksum matches the download the stub serves.
+const TEST_ARCHIVE_SHA256 = '4bf5122f344554c53bde2ebb8cd2b7e3d1600ad631c385a5d7cce23c7785459a';
+
+// Real releases publish a checksums.txt alongside the binaries; the repair path
+// now fails closed without it, so the stub serves one by default. Pass
+// { withChecksums: false } to exercise the fail-closed path.
+const stubRepairFetch = ({ withChecksums = true }: { withChecksums?: boolean } = {}) => {
+  const checksumsText = TEST_BINARY_ASSET_NAMES.map(name => `${TEST_ARCHIVE_SHA256}  ${name}`).join(
+    '\n'
+  );
+  const fetchMock = vi.fn((url: string) => {
+    if (url.includes('/releases/tags/')) {
+      return Promise.resolve(
+        new Response(
+          JSON.stringify({
+            tag_name: TEST_RELEASE_TAG,
+            assets: [
+              ...TEST_BINARY_ASSET_NAMES.map(name => ({
                 name,
                 browser_download_url: `https://download.test/${name}`,
               })),
-            }),
-            { status: 200, headers: { 'content-type': 'application/json' } }
-          )
-        : new Response(new Uint8Array([1]), { status: 200 })
-    )
-  );
+              ...(withChecksums
+                ? [
+                    {
+                      name: 'checksums.txt',
+                      browser_download_url: 'https://download.test/checksums.txt',
+                    },
+                  ]
+                : []),
+            ],
+          }),
+          { status: 200, headers: { 'content-type': 'application/json' } }
+        )
+      );
+    }
+    if (url.includes('checksums.txt')) {
+      return Promise.resolve(new Response(checksumsText, { status: 200 }));
+    }
+    return Promise.resolve(new Response(new Uint8Array([1]), { status: 200 }));
+  });
   vi.stubGlobal('fetch', fetchMock);
   vi.stubEnv('GITHUB_TAG', TEST_RELEASE_TAG);
   return fetchMock;
@@ -321,13 +345,45 @@ describe('run-companion-modules', () => {
         expect(replacedCompanion.dev).toBe(originalCompanion.dev);
         expect(replacedCompanion.ino).not.toBe(originalCompanion.ino);
         expect(fs.readFileSync(releaseTagPath, 'utf8')).toBe(`${TEST_RELEASE_TAG}\n`);
-        expect(fetchMock).toHaveBeenCalledTimes(2);
+        expect(fetchMock).toHaveBeenCalledTimes(3);
       }).pipe(
         Effect.ensuring(
           Effect.sync(() => fs.rmSync(installDirectory, { recursive: true, force: true }))
         )
       );
     });
+
+    it.effect(
+      '[Given] a release with no published checksum [Then] repair fails closed instead of installing unverified files',
+      () => {
+        const installDirectory = fs.mkdtempSync(
+          path.join(os.tmpdir(), 'composio-run-repair-nochecksum-')
+        );
+        const execPath = path.join(installDirectory, 'composio');
+        const companionRelativePath = RUN_COMPANION_MODULE_FILENAMES[0]!;
+        const companionPath = path.join(installDirectory, companionRelativePath);
+        fs.mkdirSync(path.dirname(companionPath), { recursive: true });
+        fs.writeFileSync(companionPath, 'old-companion');
+        stubRepairFetch({ withChecksums: false });
+        mockArchiveContents();
+
+        return Effect.gen(function* () {
+          const error = yield* repairMissingInstalledRunCompanionModules({
+            callerImportMetaUrl: 'file:///$bunfs/root/commands.mjs',
+            execPath,
+            appVersion: '0.0.0-test',
+          }).pipe(Effect.flip);
+
+          expect(error.message).toContain('no published checksum');
+          // The unverified archive must not overwrite the installed file.
+          expect(fs.readFileSync(companionPath, 'utf8')).toBe('old-companion');
+        }).pipe(
+          Effect.ensuring(
+            Effect.sync(() => fs.rmSync(installDirectory, { recursive: true, force: true }))
+          )
+        );
+      }
+    );
 
     it.effect('[Given] an incomplete archive [Then] repair preserves release metadata', () => {
       const installDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'composio-run-repair-test-'));

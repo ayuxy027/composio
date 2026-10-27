@@ -32,6 +32,12 @@
   the single matching upload field in an existing array item; ambiguous targets
   require explicit JSON. This fixes Word and PowerPoint image editing through the CLI.
 
+- `composio upgrade`, the run-companion self-repair, and `composio setup skill`
+  now refuse to install a downloaded archive whose SHA-256 checksum is not
+  published in the release's `checksums.txt` (or does not match it). Previously
+  a missing checksum was silently skipped and reported as success, and
+  `composio setup skill` performed no integrity check at all.
+
 - `composio upgrade` no longer starts with a stale "Update available" line.
   The line came from the cached daily update check, so right after a release
   it could name an older version than the one `composio upgrade` then

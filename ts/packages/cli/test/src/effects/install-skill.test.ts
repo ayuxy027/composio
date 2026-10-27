@@ -6,6 +6,7 @@ import * as BunPath from '@effect/platform-bun/BunPath';
 import * as tempy from 'tempy';
 import { TerminalUITest } from 'test/__utils__/services/terminal-ui-test';
 import { startTestHttpServer } from 'test/__utils__/http-server';
+import { createHash } from 'node:crypto';
 import {
   inferSkillReleaseChannel,
   installSkill,
@@ -27,6 +28,9 @@ const TEST_SKILL_ZIP = Uint8Array.from(
   ),
   character => character.charCodeAt(0)
 );
+
+const skillChecksumsText = (skillZip: Uint8Array) =>
+  `${createHash('sha256').update(skillZip).digest('hex')}  composio-skill.zip\n`;
 
 const TestPlatform = Layer.mergeAll(BunFileSystem.layer, BunPath.layer);
 
@@ -64,6 +68,12 @@ const startSkillReleaseServer = (skillZip: Uint8Array) =>
       return;
     }
 
+    if (req.url === '/checksums.txt') {
+      res.writeHead(200, { 'content-type': 'text/plain' });
+      res.end(skillChecksumsText(skillZip));
+      return;
+    }
+
     res.writeHead(200, { 'content-type': 'application/json' });
     res.end(
       JSON.stringify({
@@ -71,6 +81,10 @@ const startSkillReleaseServer = (skillZip: Uint8Array) =>
           {
             name: 'composio-skill.zip',
             browser_download_url: `http://${req.headers.host}/skill.zip`,
+          },
+          {
+            name: 'checksums.txt',
+            browser_download_url: `http://${req.headers.host}/checksums.txt`,
           },
         ],
       })
@@ -261,6 +275,12 @@ describe('install-skill', () => {
           return;
         }
 
+        if (req.url === '/checksums.txt') {
+          res.writeHead(200, { 'content-type': 'text/plain' });
+          res.end(skillChecksumsText(TEST_SKILL_ZIP));
+          return;
+        }
+
         requestedReleasePath = req.url ?? '';
         res.writeHead(200, { 'content-type': 'application/json' });
         res.end(
@@ -270,6 +290,10 @@ describe('install-skill', () => {
               {
                 name: 'composio-skill.zip',
                 browser_download_url: `http://${req.headers.host}/skill.zip`,
+              },
+              {
+                name: 'checksums.txt',
+                browser_download_url: `http://${req.headers.host}/checksums.txt`,
               },
             ],
           })
@@ -405,6 +429,85 @@ describe('install-skill', () => {
 
       const fs = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
+      expect(yield* fs.exists(path.join(home, '.agents', '.tmp-skill-install'))).toBe(false);
+    }).pipe(Effect.provide(TestPlatform))
+  );
+
+  it.effect('refuses to install a skill when the release publishes no checksum', () =>
+    Effect.gen(function* () {
+      // Serves the archive but no checksums.txt asset: must fail closed.
+      const apiBaseUrl = yield* startTestHttpServer((req, res) => {
+        if (req.url === '/skill.zip') {
+          res.writeHead(200, { 'content-type': 'application/zip' });
+          res.end(TEST_SKILL_ZIP);
+          return;
+        }
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(
+          JSON.stringify({
+            tag_name: TEST_RELEASE_TAG,
+            assets: [
+              {
+                name: 'composio-skill.zip',
+                browser_download_url: `http://${req.headers.host}/skill.zip`,
+              },
+            ],
+          })
+        );
+      });
+      const home = tempy.temporaryDirectory();
+      const error = yield* Effect.flip(makeInstallEffect(home, apiBaseUrl));
+
+      expect(error).toBeInstanceOf(SkillInstallError);
+      expect(error).toMatchObject({ phase: 'verify' });
+
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      expect(yield* fs.exists(path.join(home, '.agents', 'skills', 'composio-cli'))).toBe(false);
+      expect(yield* fs.exists(path.join(home, '.agents', '.tmp-skill-install'))).toBe(false);
+    }).pipe(Effect.provide(TestPlatform))
+  );
+
+  it.effect('refuses to install a skill whose archive fails checksum verification', () =>
+    Effect.gen(function* () {
+      // Serves a checksums.txt whose hash does not match the archive (tamper).
+      const apiBaseUrl = yield* startTestHttpServer((req, res) => {
+        if (req.url === '/skill.zip') {
+          res.writeHead(200, { 'content-type': 'application/zip' });
+          res.end(TEST_SKILL_ZIP);
+          return;
+        }
+        if (req.url === '/checksums.txt') {
+          res.writeHead(200, { 'content-type': 'text/plain' });
+          res.end(`${'0'.repeat(64)}  composio-skill.zip\n`);
+          return;
+        }
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(
+          JSON.stringify({
+            tag_name: TEST_RELEASE_TAG,
+            assets: [
+              {
+                name: 'composio-skill.zip',
+                browser_download_url: `http://${req.headers.host}/skill.zip`,
+              },
+              {
+                name: 'checksums.txt',
+                browser_download_url: `http://${req.headers.host}/checksums.txt`,
+              },
+            ],
+          })
+        );
+      });
+      const home = tempy.temporaryDirectory();
+      const error = yield* Effect.flip(makeInstallEffect(home, apiBaseUrl));
+
+      expect(error).toBeInstanceOf(SkillInstallError);
+      expect(error).toMatchObject({ phase: 'verify' });
+
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      expect(yield* fs.exists(path.join(home, '.agents', 'skills', 'composio-cli'))).toBe(false);
       expect(yield* fs.exists(path.join(home, '.agents', '.tmp-skill-install'))).toBe(false);
     }).pipe(Effect.provide(TestPlatform))
   );

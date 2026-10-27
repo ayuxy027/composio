@@ -680,14 +680,20 @@ const upgrade = (
         yield* spinner.message('Verifying checksum...');
 
         const checksums = yield* fetchChecksums(ctx, release);
-        if (Option.isSome(checksums)) {
-          const expectedHash = checksums.value.get(name);
-          if (expectedHash) {
-            yield* verifyChecksum(data, expectedHash, name);
-          } else {
-            yield* Effect.logDebug(`No checksum entry found for ${name} — skipping verification`);
-          }
+        const expectedHash = Option.getOrUndefined(checksums)?.get(name);
+        if (!expectedHash) {
+          // Fail closed: an absent checksums.txt (or a missing entry) must not
+          // silently skip verification and report success. Refuse the install.
+          return yield* Effect.fail(
+            new UpgradeBinaryError({
+              message:
+                `Cannot verify ${name}: no published checksum for ${release.tag_name}. ` +
+                `Refusing to install an unverified binary. Retry the upgrade, or reinstall ` +
+                `from the official releases page.`,
+            })
+          );
         }
+        yield* verifyChecksum(data, expectedHash, name);
 
         yield* spinner.message('Extracting...');
 

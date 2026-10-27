@@ -510,17 +510,27 @@ export const repairMissingInstalledRunCompanionModules = ({
       catch: toRepairError,
     });
     const expectedChecksum = checksums?.get(asset.name);
-    if (expectedChecksum) {
-      yield* Effect.tryPromise({
-        try: () =>
-          verifyChecksum({
-            data: archiveData,
-            expectedHash: expectedChecksum,
-            fileName: asset.name,
-          }),
-        catch: toRepairError,
-      });
+    if (!expectedChecksum) {
+      // Fail closed: do not install an unverified companion module when no
+      // checksum is published for it in the pinned release.
+      return yield* Effect.fail(
+        toRepairError(
+          new Error(
+            `Cannot verify ${asset.name} from ${release.tag_name}: no published checksum. ` +
+              `Refusing to install an unverified companion module.`
+          )
+        )
+      );
     }
+    yield* Effect.tryPromise({
+      try: () =>
+        verifyChecksum({
+          data: archiveData,
+          expectedHash: expectedChecksum,
+          fileName: asset.name,
+        }),
+      catch: toRepairError,
+    });
 
     return yield* Effect.scoped(
       Effect.gen(function* () {
